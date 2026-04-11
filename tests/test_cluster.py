@@ -41,3 +41,27 @@ def test_n_clusters():
     c.assign(_norm([0, 1, 0]))
     c.assign(_norm([0, 0, 1]))
     assert c.n_clusters == 3
+
+
+def test_assign_batch_matches_sequential():
+    """assign_batch must produce identical results to calling assign() in sequence."""
+    embeddings = np.array([
+        _norm([1, 0, 0]),
+        _norm([0.95, 0.05, 0]),
+        _norm([0, 1, 0]),
+        _norm([0, 0.9, 0.1]),
+        _norm([0, 0, 1]),
+    ])
+    # Sequential
+    seq = FaceCluster(threshold=0.5)
+    seq_ids = [seq.assign(e) for e in embeddings]
+    # Batch
+    batch = FaceCluster(threshold=0.5)
+    batch_ids = batch.assign_batch(embeddings)
+    assert batch_ids == seq_ids
+    assert batch.n_clusters == seq.n_clusters
+
+
+def test_assign_batch_empty():
+    c = FaceCluster(threshold=0.5)
+    assert c.assign_batch(np.zeros((0, 3), dtype=np.float32)) == []
