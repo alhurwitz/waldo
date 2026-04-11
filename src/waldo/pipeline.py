@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, Future
 from pathlib import Path
 
 import cv2
@@ -31,6 +31,66 @@ from .timeline import build_intervals
 log = logging.getLogger(__name__)
 
 _MAX_DET_WIDTH = 960
+
+# --- Process pool worker state ---
+_worker_embedder: Embedder | None = None
+
+
+def _init_worker() -> None:
+    """Initialise a per-process Embedder (not picklable, so each worker creates its own)."""
+    global _worker_embedder
+    _worker_embedder = Embedder()
+
+
+def _worker_scan_video(
+    args: tuple[Path, Path, float, float],
+) -> tuple[Path, VideoCache, dict[str, np.ndarray]] | None:
+    """Top-level function for ProcessPoolExecutor — scans one video."""
+    video, input_dir, fps, threshold = args
+    from .cache import cache_path, load_cache, save_cache
+    from .cache import CachedFace, CachedSample, VideoCache
+
+    assert _worker_embedder is not None
+    path = cache_path(input_dir, video)
+    mtime = video.stat().st_mtime
+    cached = load_cache(path)
+    if cached and cached.video_mtime == mtime and cached.sampler_fps == fps:
+        return video, cached, {}
+
+    face_frames: dict[str, np.ndarray] = {}
+    samples: list[CachedSample] = []
+    scenes = detect_scenes(video)
+    for t, frame in sample_frames(video, fps):
+        small = _downscale(frame)
+        faces = _worker_embedder.detect(small)
+        samples.append(
+            CachedSample(
+                t=t,
+                faces=[CachedFace(bbox=f.bbox, embedding=f.embedding) for f in faces],
+            )
+        )
+        if faces:
+            face_frames[f"{video.stem}_t{t:.3f}"] = small
+
+    cache = VideoCache(video_mtime=mtime, sampler_fps=fps, scenes=scenes, samples=samples)
+    save_cache(path, cache)
+    return video, cache, face_frames
+
+
+def _worker_scan_photo(
+    photo: Path,
+) -> tuple[Path, np.ndarray, list[tuple[np.ndarray, tuple[float, float, float, float]]]] | None:
+    """Top-level function for ProcessPoolExecutor — scans one photo."""
+    assert _worker_embedder is not None
+    try:
+        img = cv2.imread(str(photo))
+        if img is not None:
+            detected = [(f.embedding, f.bbox) for f in _worker_embedder.detect(img)]
+            if detected:
+                return photo, img, detected
+    except Exception as e:
+        log.warning("skipping %s: %s", photo.name, e)
+    return None
 
 
 def _downscale(frame: np.ndarray) -> np.ndarray:
@@ -235,61 +295,52 @@ def scan_faces(cfg: Config) -> list[str]:
     video_results: list[tuple[Path, VideoCache, dict[str, np.ndarray]]] = []
     photo_results: list[tuple[Path, np.ndarray, list[tuple[np.ndarray, tuple[float, float, float, float]]]]] = []
 
+    use_processes = cfg.workers > 1
+
     with _make_progress() as progress:
-        # --- Parallel video detection (frames collected during detection) ---
+        # --- Video detection ---
         if videos:
             task = progress.add_task("scanning videos", total=len(videos))
 
-            def _scan_video(v: Path) -> tuple[Path, VideoCache, dict[str, np.ndarray]] | None:
-                try:
-                    cache, face_frames = _ensure_cache(
-                        v, cfg, embedder, progress=progress, collect_frames=True,
-                    )
-                    return v, cache, face_frames
-                except Exception as e:
-                    log.warning("skipping %s: %s", v.name, e)
-                    return None
-                finally:
-                    progress.advance(task)
-
-            if cfg.workers <= 1:
-                for v in videos:
-                    r = _scan_video(v)
-                    if r:
-                        video_results.append(r)
-            else:
-                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
-                    for r in pool.map(_scan_video, videos):
+            if use_processes:
+                args = [(v, cfg.input_dir, cfg.fps, cfg.threshold) for v in videos]
+                with ProcessPoolExecutor(max_workers=cfg.workers, initializer=_init_worker) as pool:
+                    for r in pool.map(_worker_scan_video, args):
                         if r:
                             video_results.append(r)
+                        progress.advance(task)
+            else:
+                for v in videos:
+                    try:
+                        cache, face_frames = _ensure_cache(
+                            v, cfg, embedder, progress=progress, collect_frames=True,
+                        )
+                        video_results.append((v, cache, face_frames))
+                    except Exception as e:
+                        log.warning("skipping %s: %s", v.name, e)
+                    progress.advance(task)
 
-        # --- Parallel photo detection (images kept for cropping) ---
+        # --- Photo detection ---
         if photos:
             task = progress.add_task("scanning photos", total=len(photos))
 
-            def _scan_photo(p: Path) -> tuple[Path, np.ndarray, list[tuple[np.ndarray, tuple[float, float, float, float]]]] | None:
-                try:
-                    img = cv2.imread(str(p))
-                    if img is not None:
-                        detected = [(f.embedding, f.bbox) for f in embedder.detect(img)]
-                        if detected:
-                            return p, img, detected
-                except Exception as e:
-                    log.warning("skipping %s: %s", p.name, e)
-                finally:
-                    progress.advance(task)
-                return None
-
-            if cfg.workers <= 1:
-                for p in photos:
-                    r = _scan_photo(p)
-                    if r:
-                        photo_results.append(r)
-            else:
-                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
-                    for r in pool.map(_scan_photo, photos):
+            if use_processes:
+                with ProcessPoolExecutor(max_workers=cfg.workers, initializer=_init_worker) as pool:
+                    for r in pool.map(_worker_scan_photo, photos):
                         if r:
                             photo_results.append(r)
+                        progress.advance(task)
+            else:
+                for p in photos:
+                    try:
+                        img = cv2.imread(str(p))
+                        if img is not None:
+                            detected = [(f.embedding, f.bbox) for f in embedder.detect(img)]
+                            if detected:
+                                photo_results.append((p, img, detected))
+                    except Exception as e:
+                        log.warning("skipping %s: %s", p.name, e)
+                    progress.advance(task)
 
     # Phase 2: cluster + use already-decoded frames (no re-reading).
     for video, cache, face_frames in video_results:
