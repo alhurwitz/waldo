@@ -189,35 +189,59 @@ def _auto_cluster(cfg: Config, embedder: Embedder) -> dict[str, list[np.ndarray]
     with _make_progress() as progress:
         # Videos — use cached embeddings or scan.
         if videos:
-            task = progress.add_task("clustering videos", total=len(videos))
-            for video in videos:
+            task = progress.add_task("scanning videos", total=len(videos))
+            caches: list[VideoCache] = []
+
+            def _cache_video(v: Path) -> VideoCache | None:
                 try:
-                    cache = _ensure_cache(video, cfg, embedder, progress=progress)
-                    embs = [
-                        f.embedding
-                        for s in cache.samples
-                        for f in s.faces
-                    ]
-                    if embs:
-                        cluster.assign_batch(np.array(embs))
+                    return _ensure_cache(v, cfg, embedder, progress=progress)
                 except Exception as e:
-                    log.warning("skipping %s: %s", video.name, e)
-                progress.advance(task)
+                    log.warning("skipping %s: %s", v.name, e)
+                    return None
+                finally:
+                    progress.advance(task)
+
+            if cfg.workers <= 1:
+                caches = [c for v in videos if (c := _cache_video(v)) is not None]
+            else:
+                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+                    caches = [c for c in pool.map(_cache_video, videos) if c is not None]
+
+            all_embs = [
+                f.embedding
+                for cache in caches
+                for s in cache.samples
+                for f in s.faces
+            ]
+            if all_embs:
+                cluster.assign_batch(np.array(all_embs))
 
         # Photos.
         if photos:
-            task = progress.add_task("clustering photos", total=len(photos))
-            for img_path in photos:
+            task = progress.add_task("scanning photos", total=len(photos))
+            photo_embs: list[np.ndarray] = []
+
+            def _detect_photo(p: Path) -> list[np.ndarray]:
                 try:
-                    img = cv2.imread(str(img_path))
+                    img = cv2.imread(str(p))
                     if img is not None:
-                        faces = embedder.detect(img)
-                        if faces:
-                            embs = np.array([f.embedding for f in faces])
-                            cluster.assign_batch(embs)
+                        return [f.embedding for f in embedder.detect(img)]
                 except Exception as e:
-                    log.warning("skipping %s: %s", img_path.name, e)
-                progress.advance(task)
+                    log.warning("skipping %s: %s", p.name, e)
+                finally:
+                    progress.advance(task)
+                return []
+
+            if cfg.workers <= 1:
+                for p in photos:
+                    photo_embs.extend(_detect_photo(p))
+            else:
+                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+                    for embs in pool.map(_detect_photo, photos):
+                        photo_embs.extend(embs)
+
+            if photo_embs:
+                cluster.assign_batch(np.array(photo_embs))
 
     refs = cluster.centroids_as_refs(min_count=2)
     log.info("auto-cluster: found %d person(s) across %d cluster(s)",
