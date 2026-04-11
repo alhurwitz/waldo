@@ -215,48 +215,93 @@ def scan_faces(cfg: Config) -> list[str]:
     cluster = FaceCluster(threshold=cfg.threshold)
     frames: dict[str, np.ndarray] = {}
 
+    # Phase 1: detect faces in parallel (I/O + inference bound).
+    # Phase 2: cluster sequentially (CPU, order-dependent).
+
+    video_results: list[tuple[Path, VideoCache]] = []
+    photo_results: list[tuple[Path, list[tuple[np.ndarray, tuple[float, float, float, float]]]]] = []
+
     with _make_progress() as progress:
+        # --- Parallel video detection ---
         if videos:
             task = progress.add_task("scanning videos", total=len(videos))
-            for video in videos:
+
+            def _scan_video(v: Path) -> tuple[Path, VideoCache] | None:
                 try:
-                    cache = _ensure_cache(video, cfg, embedder, progress=progress)
-                    # Collect source_ids that have faces so we can re-read those frames
-                    needed_times: set[float] = set()
-                    for sample in cache.samples:
-                        for face in sample.faces:
-                            source_id = f"{video.stem}_t{sample.t:.3f}"
-                            cluster.assign(face.embedding, source_id=source_id, bbox=face.bbox)
-                            needed_times.add(sample.t)
-
-                    # Re-read frames that had faces for cropping
-                    if needed_times:
-                        for t, frame in sample_frames(video, cfg.fps):
-                            if t in needed_times:
-                                source_id = f"{video.stem}_t{t:.3f}"
-                                if source_id not in frames:
-                                    frames[source_id] = _downscale(frame)
-                                needed_times.discard(t)
-                            if not needed_times:
-                                break
+                    return v, _ensure_cache(v, cfg, embedder, progress=progress)
                 except Exception as e:
-                    log.warning("skipping %s: %s", video.name, e)
-                progress.advance(task)
+                    log.warning("skipping %s: %s", v.name, e)
+                    return None
+                finally:
+                    progress.advance(task)
 
+            if cfg.workers <= 1:
+                for v in videos:
+                    r = _scan_video(v)
+                    if r:
+                        video_results.append(r)
+            else:
+                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+                    for r in pool.map(_scan_video, videos):
+                        if r:
+                            video_results.append(r)
+
+        # --- Parallel photo detection ---
         if photos:
             task = progress.add_task("scanning photos", total=len(photos))
-            for img_path in photos:
+
+            def _scan_photo(p: Path) -> tuple[Path, list[tuple[np.ndarray, tuple[float, float, float, float]]]] | None:
                 try:
-                    img = cv2.imread(str(img_path))
+                    img = cv2.imread(str(p))
                     if img is not None:
-                        for face in embedder.detect(img):
-                            source_id = img_path.stem
-                            cluster.assign(face.embedding, source_id=source_id, bbox=face.bbox)
-                            if source_id not in frames:
-                                frames[source_id] = img
+                        detected = [(f.embedding, f.bbox) for f in embedder.detect(img)]
+                        if detected:
+                            return p, detected
                 except Exception as e:
-                    log.warning("skipping %s: %s", img_path.name, e)
-                progress.advance(task)
+                    log.warning("skipping %s: %s", p.name, e)
+                finally:
+                    progress.advance(task)
+                return None
+
+            if cfg.workers <= 1:
+                for p in photos:
+                    r = _scan_photo(p)
+                    if r:
+                        photo_results.append(r)
+            else:
+                with ThreadPoolExecutor(max_workers=cfg.workers) as pool:
+                    for r in pool.map(_scan_photo, photos):
+                        if r:
+                            photo_results.append(r)
+
+    # Phase 2: cluster + collect frames (sequential, fast).
+    for video, cache in video_results:
+        needed_times: set[float] = set()
+        for sample in cache.samples:
+            for face in sample.faces:
+                source_id = f"{video.stem}_t{sample.t:.3f}"
+                cluster.assign(face.embedding, source_id=source_id, bbox=face.bbox)
+                needed_times.add(sample.t)
+
+        if needed_times:
+            for t, frame in sample_frames(video, cfg.fps):
+                if t in needed_times:
+                    source_id = f"{video.stem}_t{t:.3f}"
+                    if source_id not in frames:
+                        frames[source_id] = _downscale(frame)
+                    needed_times.discard(t)
+                if not needed_times:
+                    break
+
+    for img_path, detected in photo_results:
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+        for emb, bbox in detected:
+            source_id = img_path.stem
+            cluster.assign(emb, source_id=source_id, bbox=bbox)
+            if source_id not in frames:
+                frames[source_id] = img
 
     if cluster.n_clusters == 0:
         log.warning("no faces detected in any media")
