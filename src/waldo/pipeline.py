@@ -62,7 +62,18 @@ def _ensure_cache(
     cfg: Config,
     embedder: Embedder,
     progress: Progress | None = None,
-) -> VideoCache:
+    collect_frames: bool = False,
+) -> tuple[VideoCache, dict[str, np.ndarray]]:
+    """Build or load the face-detection cache for a video.
+
+    When *collect_frames* is True, also returns a dict mapping
+    ``{video.stem}_t{timestamp:.3f}`` → downscaled frame for every
+    sample that contained at least one face.  This avoids a second
+    decode pass when frames are needed for cropping.
+
+    Returns ``(cache, face_frames)`` — *face_frames* is empty when
+    *collect_frames* is False or when the cache was already on disk.
+    """
     path = cache_path(cfg.input_dir, video)
     mtime = video.stat().st_mtime
     cached = load_cache(path)
@@ -71,9 +82,10 @@ def _ensure_cache(
         and cached.video_mtime == mtime
         and cached.sampler_fps == cfg.fps
     ):
-        return cached
+        return cached, {}
 
     log.info("scanning %s", video.name)
+    face_frames: dict[str, np.ndarray] = {}
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         scenes_future: Future[list[tuple[float, float]]] = pool.submit(detect_scenes, video)
@@ -90,6 +102,8 @@ def _ensure_cache(
                     faces=[CachedFace(bbox=f.bbox, embedding=f.embedding) for f in faces],
                 )
             )
+            if collect_frames and faces:
+                face_frames[f"{video.stem}_t{t:.3f}"] = small
             if progress is not None and task_id is not None:
                 progress.advance(task_id)
 
@@ -100,7 +114,7 @@ def _ensure_cache(
 
     cache = VideoCache(video_mtime=mtime, sampler_fps=cfg.fps, scenes=scenes, samples=samples)
     save_cache(path, cache)
-    return cache
+    return cache, face_frames
 
 
 def _process_video(
@@ -111,7 +125,7 @@ def _process_video(
     embedder: Embedder,
     progress: Progress | None = None,
 ) -> list[Path]:
-    cache = _ensure_cache(video, cfg, embedder, progress=progress)
+    cache, _ = _ensure_cache(video, cfg, embedder, progress=progress)
 
     per_person: dict[str, list[tuple[float, bool]]] = {p: [] for p in persons}
     for sample in cache.samples:
@@ -218,17 +232,20 @@ def scan_faces(cfg: Config) -> list[str]:
     # Phase 1: detect faces in parallel (I/O + inference bound).
     # Phase 2: cluster sequentially (CPU, order-dependent).
 
-    video_results: list[tuple[Path, VideoCache]] = []
-    photo_results: list[tuple[Path, list[tuple[np.ndarray, tuple[float, float, float, float]]]]] = []
+    video_results: list[tuple[Path, VideoCache, dict[str, np.ndarray]]] = []
+    photo_results: list[tuple[Path, np.ndarray, list[tuple[np.ndarray, tuple[float, float, float, float]]]]] = []
 
     with _make_progress() as progress:
-        # --- Parallel video detection ---
+        # --- Parallel video detection (frames collected during detection) ---
         if videos:
             task = progress.add_task("scanning videos", total=len(videos))
 
-            def _scan_video(v: Path) -> tuple[Path, VideoCache] | None:
+            def _scan_video(v: Path) -> tuple[Path, VideoCache, dict[str, np.ndarray]] | None:
                 try:
-                    return v, _ensure_cache(v, cfg, embedder, progress=progress)
+                    cache, face_frames = _ensure_cache(
+                        v, cfg, embedder, progress=progress, collect_frames=True,
+                    )
+                    return v, cache, face_frames
                 except Exception as e:
                     log.warning("skipping %s: %s", v.name, e)
                     return None
@@ -246,17 +263,17 @@ def scan_faces(cfg: Config) -> list[str]:
                         if r:
                             video_results.append(r)
 
-        # --- Parallel photo detection ---
+        # --- Parallel photo detection (images kept for cropping) ---
         if photos:
             task = progress.add_task("scanning photos", total=len(photos))
 
-            def _scan_photo(p: Path) -> tuple[Path, list[tuple[np.ndarray, tuple[float, float, float, float]]]] | None:
+            def _scan_photo(p: Path) -> tuple[Path, np.ndarray, list[tuple[np.ndarray, tuple[float, float, float, float]]]] | None:
                 try:
                     img = cv2.imread(str(p))
                     if img is not None:
                         detected = [(f.embedding, f.bbox) for f in embedder.detect(img)]
                         if detected:
-                            return p, detected
+                            return p, img, detected
                 except Exception as e:
                     log.warning("skipping %s: %s", p.name, e)
                 finally:
@@ -274,29 +291,30 @@ def scan_faces(cfg: Config) -> list[str]:
                         if r:
                             photo_results.append(r)
 
-    # Phase 2: cluster + collect frames (sequential, fast).
-    for video, cache in video_results:
-        needed_times: set[float] = set()
+    # Phase 2: cluster + use already-decoded frames (no re-reading).
+    for video, cache, face_frames in video_results:
+        frames.update(face_frames)
         for sample in cache.samples:
             for face in sample.faces:
                 source_id = f"{video.stem}_t{sample.t:.3f}"
                 cluster.assign(face.embedding, source_id=source_id, bbox=face.bbox)
-                needed_times.add(sample.t)
 
-        if needed_times:
-            for t, frame in sample_frames(video, cfg.fps):
-                if t in needed_times:
-                    source_id = f"{video.stem}_t{t:.3f}"
-                    if source_id not in frames:
-                        frames[source_id] = _downscale(frame)
-                    needed_times.discard(t)
-                if not needed_times:
-                    break
+        # If cache was loaded from disk, face_frames is empty — re-read needed frames.
+        if not face_frames:
+            needed_times: set[float] = {
+                s.t for s in cache.samples if s.faces
+            }
+            if needed_times:
+                for t, frame in sample_frames(video, cfg.fps):
+                    if t in needed_times:
+                        source_id = f"{video.stem}_t{t:.3f}"
+                        if source_id not in frames:
+                            frames[source_id] = _downscale(frame)
+                        needed_times.discard(t)
+                    if not needed_times:
+                        break
 
-    for img_path, detected in photo_results:
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
+    for img_path, img, detected in photo_results:
         for emb, bbox in detected:
             source_id = img_path.stem
             cluster.assign(emb, source_id=source_id, bbox=bbox)
