@@ -77,9 +77,10 @@ def test_get_sources():
     assert sources[0][0] == ("img1", (0, 0, 100, 100))
 
 
-def test_faiss_index_used():
-    """Verify FaceCluster uses a FAISS index internally."""
-    import faiss
+def test_matrix_based_storage():
+    """Verify FaceCluster uses matrix-based centroid storage."""
     c = FaceCluster(threshold=0.5)
     c.assign(_norm([1, 0, 0]))
-    assert isinstance(c._index, faiss.IndexFlatIP)
+    c.assign(_norm([0, 1, 0]))
+    assert c._centroid_matrix.shape[1] == 3  # dim inferred from first embedding
+    assert c._size == 2
