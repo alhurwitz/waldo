@@ -9,6 +9,7 @@ import pytest
 from waldo.config import Config
 from waldo.embedder import Face
 from waldo.identify import run_identify_prompts
+from waldo import pipeline as _pipeline_mod  # ensure module is loaded for patching
 
 
 def _random_emb(seed: int) -> np.ndarray:

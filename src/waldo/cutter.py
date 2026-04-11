@@ -7,6 +7,14 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def check_ffmpeg() -> None:
+    """Raise if ffmpeg is not available."""
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH – install it first")
+
+
 def _hms(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)

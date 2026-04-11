@@ -22,7 +22,7 @@ from .config import IMG_EXTS, VIDEO_EXTS, Config
 from .cropper import save_crops
 from .cutter import check_ffmpeg, cut_clip
 from .embedder import Embedder
-from .matcher import classify_face
+from .matcher import RefIndex
 from .sampler import estimate_sample_count, sample_frames
 from .scenes import detect_scenes
 from .snapper import pad_within_scenes_and_union
@@ -106,19 +106,22 @@ def _ensure_cache(
 def _process_video(
     video: Path,
     cfg: Config,
-    refs: dict[str, list[np.ndarray]],
+    ref_index: RefIndex,
+    persons: list[str],
     embedder: Embedder,
     progress: Progress | None = None,
 ) -> list[Path]:
     cache = _ensure_cache(video, cfg, embedder, progress=progress)
 
-    per_person: dict[str, list[tuple[float, bool]]] = {p: [] for p in refs}
+    per_person: dict[str, list[tuple[float, bool]]] = {p: [] for p in persons}
     for sample in cache.samples:
-        present_now = {p: False for p in refs}
-        for face in sample.faces:
-            who = classify_face(face.embedding, refs, cfg.threshold)
-            if who:
-                present_now[who] = True
+        present_now = {p: False for p in persons}
+        if sample.faces:
+            embeddings = np.array([f.embedding for f in sample.faces])
+            matches = ref_index.classify_batch(embeddings, cfg.threshold)
+            for who in matches:
+                if who:
+                    present_now[who] = True
         for p, present in present_now.items():
             per_person[p].append((sample.t, present))
 
@@ -148,7 +151,7 @@ def _process_video(
 
 def _process_photo(
     img_path: Path,
-    refs: dict[str, list[np.ndarray]],
+    ref_index: RefIndex,
     output_dir: Path,
     embedder: Embedder,
     threshold: float,
@@ -161,11 +164,9 @@ def _process_photo(
     if not faces:
         return None
 
-    found: set[str] = set()
-    for face in faces:
-        who = classify_face(face.embedding, refs, threshold)
-        if who:
-            found.add(who)
+    embeddings = np.array([f.embedding for f in faces])
+    matches = ref_index.classify_batch(embeddings, threshold)
+    found: set[str] = {who for who in matches if who}
     if not found:
         return None
 
@@ -287,6 +288,9 @@ def extract_clips(cfg: Config) -> None:
     from .references import load_references
     refs_arrays = load_references(cfg.refs_dir, embedder)
 
+    ref_index = RefIndex(refs_arrays)
+    persons = list(refs_arrays.keys())
+
     videos, photos = _discover_media(cfg.input_dir)
 
     if not videos and not photos:
@@ -300,7 +304,7 @@ def extract_clips(cfg: Config) -> None:
 
             def _do_video(v: Path) -> None:
                 try:
-                    _process_video(v, cfg, refs_arrays, embedder, progress=progress)
+                    _process_video(v, cfg, ref_index, persons, embedder, progress=progress)
                 except Exception as e:
                     log.exception("failed processing %s: %s", v, e)
                 progress.advance(videos_task)
@@ -318,7 +322,7 @@ def extract_clips(cfg: Config) -> None:
 
             def _do_photo(p: Path) -> None:
                 try:
-                    _process_photo(p, refs_arrays, cfg.output_dir, embedder, cfg.threshold)
+                    _process_photo(p, ref_index, cfg.output_dir, embedder, cfg.threshold)
                 except Exception as e:
                     log.exception("failed processing %s: %s", p, e)
                 progress.advance(photos_task)

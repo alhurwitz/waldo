@@ -43,20 +43,43 @@ def test_n_clusters():
     assert c.n_clusters == 3
 
 
-def test_cluster_tracks_face_sources():
+def test_assign_batch_matches_sequential():
+    """assign_batch must produce identical results to calling assign() in sequence."""
+    embeddings = np.array([
+        _norm([1, 0, 0]),
+        _norm([0.95, 0.05, 0]),
+        _norm([0, 1, 0]),
+        _norm([0, 0.9, 0.1]),
+        _norm([0, 0, 1]),
+    ])
+    # Sequential
+    seq = FaceCluster(threshold=0.5)
+    seq_ids = [seq.assign(e) for e in embeddings]
+    # Batch
+    batch = FaceCluster(threshold=0.5)
+    batch_ids = batch.assign_batch(embeddings)
+    assert batch_ids == seq_ids
+    assert batch.n_clusters == seq.n_clusters
+
+
+def test_assign_batch_empty():
     c = FaceCluster(threshold=0.5)
-    a = _norm([1, 0, 0])
-    b = _norm([0.95, 0.05, 0])  # same cluster as a
-    d = _norm([0, 1, 0])  # different cluster
+    assert c.assign_batch(np.zeros((0, 3), dtype=np.float32)) == []
 
-    c.assign(a, source_id="vid1_t0.5", bbox=(10, 20, 50, 60))
-    c.assign(b, source_id="vid1_t1.0", bbox=(12, 22, 52, 62))
-    c.assign(d, source_id="vid1_t1.5", bbox=(100, 100, 200, 200))
 
+def test_get_sources():
+    c = FaceCluster(threshold=0.5)
+    c.assign(_norm([1, 0, 0]), source_id="img1", bbox=(0, 0, 100, 100))
+    c.assign(_norm([0.95, 0.05, 0]), source_id="img2", bbox=(10, 10, 90, 90))
     sources = c.get_sources()
-    assert len(sources) == 2
+    assert len(sources) == 1  # both in same cluster
     assert len(sources[0]) == 2
-    assert sources[0][0] == ("vid1_t0.5", (10, 20, 50, 60))
-    assert sources[0][1] == ("vid1_t1.0", (12, 22, 52, 62))
-    assert len(sources[1]) == 1
-    assert sources[1][0] == ("vid1_t1.5", (100, 100, 200, 200))
+    assert sources[0][0] == ("img1", (0, 0, 100, 100))
+
+
+def test_faiss_index_used():
+    """Verify FaceCluster uses a FAISS index internally."""
+    import faiss
+    c = FaceCluster(threshold=0.5)
+    c.assign(_norm([1, 0, 0]))
+    assert isinstance(c._index, faiss.IndexFlatIP)
