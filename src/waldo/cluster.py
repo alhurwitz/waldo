@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import faiss
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -13,8 +14,8 @@ class FaceCluster:
     """Greedy online clustering of L2-normalised face embeddings.
 
     Centroids are stored in a pre-allocated matrix for BLAS-optimised
-    similarity computation.  Falls back gracefully when the matrix needs
-    to grow.
+    similarity computation.  A FAISS ``IndexFlatIP`` accelerates
+    nearest-centroid lookup.
     """
 
     def __init__(self, threshold: float = 0.55, *, dim: int = 512) -> None:
@@ -24,6 +25,7 @@ class FaceCluster:
         self._centroid_matrix = np.empty((self._capacity, dim), dtype=np.float32)
         self._counts = np.empty(self._capacity, dtype=np.int64)
         self._size = 0
+        self._index = faiss.IndexFlatIP(dim)
 
     @property
     def n_clusters(self) -> int:
@@ -39,6 +41,12 @@ class FaceCluster:
         self._counts = new_counts
         self._capacity = new_cap
 
+    def _rebuild_index(self) -> None:
+        """Reset and re-add all current centroids to the FAISS index."""
+        self._index.reset()
+        if self._size > 0:
+            self._index.add(np.ascontiguousarray(self._centroid_matrix[: self._size]))
+
     def assign(self, embedding: np.ndarray) -> int:
         """Return the cluster index for this embedding (creating one if needed)."""
         if self._size == 0:
@@ -48,14 +56,18 @@ class FaceCluster:
                 self._centroid_matrix = np.empty(
                     (self._capacity, self._dim), dtype=np.float32
                 )
+                self._index = faiss.IndexFlatIP(self._dim)
             self._centroid_matrix[0] = embedding
             self._counts[0] = 1
             self._size = 1
+            self._rebuild_index()
             return 0
 
-        sims = self._centroid_matrix[: self._size] @ embedding
-        best_idx = int(np.argmax(sims))
-        best_sim = float(sims[best_idx])
+        # Use FAISS to find nearest centroid
+        _dists, indices = self._index.search(embedding.reshape(1, -1), 1)
+        best_idx = int(indices[0][0])
+        # Compute actual similarity via dot product for threshold check
+        best_sim = float(self._centroid_matrix[best_idx] @ embedding)
 
         if best_sim >= self.threshold:
             n = int(self._counts[best_idx])
@@ -65,6 +77,7 @@ class FaceCluster:
                 new_c /= norm
             self._centroid_matrix[best_idx] = new_c
             self._counts[best_idx] = n + 1
+            self._rebuild_index()
             return best_idx
 
         if self._size >= self._capacity:
@@ -72,6 +85,7 @@ class FaceCluster:
         self._centroid_matrix[self._size] = embedding
         self._counts[self._size] = 1
         self._size += 1
+        self._rebuild_index()
         return self._size - 1
 
     def assign_batch(self, embeddings: np.ndarray) -> list[int]:

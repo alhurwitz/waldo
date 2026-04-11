@@ -65,3 +65,11 @@ def test_assign_batch_matches_sequential():
 def test_assign_batch_empty():
     c = FaceCluster(threshold=0.5)
     assert c.assign_batch(np.zeros((0, 3), dtype=np.float32)) == []
+
+
+def test_faiss_index_used():
+    """Verify FaceCluster uses a FAISS index internally."""
+    import faiss
+    c = FaceCluster(threshold=0.5)
+    c.assign(_norm([1, 0, 0]))
+    assert isinstance(c._index, faiss.IndexFlatIP)

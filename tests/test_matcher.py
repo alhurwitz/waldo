@@ -51,3 +51,11 @@ def test_multiple_refs_per_person():
     idx = RefIndex(refs)
     assert idx.classify(_norm([0.95, 0.05, 0]), threshold=0.5) == "grandma"
     assert idx.classify(_norm([0.1, 0.9, 0]), threshold=0.5) == "grandpa"
+
+
+def test_faiss_index_used():
+    """Verify RefIndex uses a FAISS index internally."""
+    import faiss
+    refs = {"grandma": [_norm([1, 0, 0])]}
+    idx = RefIndex(refs)
+    assert isinstance(idx._index, faiss.IndexFlatIP)
