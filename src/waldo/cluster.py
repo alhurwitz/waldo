@@ -21,16 +21,25 @@ class FaceCluster:
         self.threshold = threshold
         self._centroids: list[np.ndarray] = []  # L2-normed
         self._counts: list[int] = []
+        self._sources: list[list[tuple[str, tuple[float, float, float, float]]]] = []
 
     @property
     def n_clusters(self) -> int:
         return len(self._centroids)
 
-    def assign(self, embedding: np.ndarray) -> int:
+    def assign(
+        self,
+        embedding: np.ndarray,
+        source_id: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+    ) -> int:
         """Return the cluster index for this embedding (creating one if needed)."""
         if not self._centroids:
             self._centroids.append(embedding.copy())
             self._counts.append(1)
+            self._sources.append([])
+            if source_id is not None and bbox is not None:
+                self._sources[0].append((source_id, bbox))
             return 0
 
         sims = np.array([float(np.dot(embedding, c)) for c in self._centroids])
@@ -46,12 +55,21 @@ class FaceCluster:
                 new_c /= norm
             self._centroids[best_idx] = new_c
             self._counts[best_idx] = n + 1
+            if source_id is not None and bbox is not None:
+                self._sources[best_idx].append((source_id, bbox))
             return best_idx
 
         # New cluster.
         self._centroids.append(embedding.copy())
         self._counts.append(1)
+        self._sources.append([])
+        if source_id is not None and bbox is not None:
+            self._sources[-1].append((source_id, bbox))
         return self.n_clusters - 1
+
+    def get_sources(self) -> list[list[tuple[str, tuple[float, float, float, float]]]]:
+        """Return per-cluster list of (source_id, bbox) tuples."""
+        return self._sources
 
     def centroids_as_refs(self, min_count: int = 2) -> dict[str, list[np.ndarray]]:
         """Export clusters as a refs dict (same shape as load_references output).

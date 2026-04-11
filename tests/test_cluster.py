@@ -41,3 +41,22 @@ def test_n_clusters():
     c.assign(_norm([0, 1, 0]))
     c.assign(_norm([0, 0, 1]))
     assert c.n_clusters == 3
+
+
+def test_cluster_tracks_face_sources():
+    c = FaceCluster(threshold=0.5)
+    a = _norm([1, 0, 0])
+    b = _norm([0.95, 0.05, 0])  # same cluster as a
+    d = _norm([0, 1, 0])  # different cluster
+
+    c.assign(a, source_id="vid1_t0.5", bbox=(10, 20, 50, 60))
+    c.assign(b, source_id="vid1_t1.0", bbox=(12, 22, 52, 62))
+    c.assign(d, source_id="vid1_t1.5", bbox=(100, 100, 200, 200))
+
+    sources = c.get_sources()
+    assert len(sources) == 2
+    assert len(sources[0]) == 2
+    assert sources[0][0] == ("vid1_t0.5", (10, 20, 50, 60))
+    assert sources[0][1] == ("vid1_t1.0", (12, 22, 52, 62))
+    assert len(sources[1]) == 1
+    assert sources[1][0] == ("vid1_t1.5", (100, 100, 200, 200))
