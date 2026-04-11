@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
@@ -16,7 +17,7 @@ class Face(BaseModel):
 
 
 class Embedder:
-    """InsightFace buffalo_l wrapper."""
+    """Thread-safe InsightFace buffalo_l wrapper."""
 
     def __init__(self) -> None:
         from insightface.app import FaceAnalysis
@@ -28,9 +29,11 @@ class Embedder:
             log.warning("CoreML provider unavailable, falling back to CPU.")
             self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
         self.app.prepare(ctx_id=0, det_size=(640, 640))
+        self._lock = threading.Lock()
 
     def detect(self, frame_bgr: np.ndarray) -> list[Face]:
-        results = self.app.get(frame_bgr)
+        with self._lock:
+            results = self.app.get(frame_bgr)
         faces: list[Face] = []
         for r in results:
             emb = r.normed_embedding.astype(np.float32)

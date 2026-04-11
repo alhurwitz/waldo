@@ -6,11 +6,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .config import IMG_EXTS
 from .embedder import Embedder
 
 log = logging.getLogger(__name__)
-
-IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 def load_references(refs_dir: Path, embedder: Embedder) -> dict[str, list[np.ndarray]]:
