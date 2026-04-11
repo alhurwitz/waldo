@@ -1,0 +1,29 @@
+[project]
+name = "waldo"
+version = "0.1.0"
+description = "Find specific people in videos and photos using face recognition. Like playing Where's Waldo, but with real faces."
+readme = "README.md"
+authors = [
+    { name = "Abert Hurwitz", email = "terpsajh@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "insightface>=0.7.3",
+    "onnxruntime>=1.18",
+    "opencv-python>=4.10",
+    "scenedetect[opencv]>=0.6.4",
+    "typer>=0.12",
+    "rich>=13.7",
+    "numpy>=1.26",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+waldo = "waldo.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
