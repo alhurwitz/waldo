@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import random
+import subprocess
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -86,3 +87,16 @@ def discover_clips(output_dir: Path, persons: list[str]) -> list[Path]:
             continue
         clips.extend(person_clips)
     return sorted(clips)
+
+
+def _probe_duration(path: Path) -> float:
+    """Return clip duration in seconds via ffprobe."""
+    out = subprocess.check_output(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            str(path),
+        ],
+    )
+    return float(out.strip())
