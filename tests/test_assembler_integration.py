@@ -54,3 +54,61 @@ def test_probe_duration_raises_on_missing_file(tmp_path):
     from waldo.assembler import _probe_duration
     with pytest.raises(subprocess.CalledProcessError):
         _probe_duration(tmp_path / "nope.mp4")
+
+
+# ---------- assemble ----------
+
+def test_assemble_cut_concatenates_durations(tmp_path):
+    from waldo.assembler import assemble
+    a = _make_clip(tmp_path / "a.mp4", 2.0, "red")
+    b = _make_clip(tmp_path / "b.mp4", 2.0, "green")
+    c = _make_clip(tmp_path / "c.mp4", 2.0, "blue")
+    out = tmp_path / "compilation.mp4"
+    assemble([a, b, c], out, transition="cut", transition_duration=0.5)
+    assert out.exists() and out.stat().st_size > 0
+    assert _ffprobe_duration(out) == pytest.approx(6.0, abs=0.5)
+
+
+def test_assemble_crossfade_subtracts_overlaps(tmp_path):
+    from waldo.assembler import assemble
+    a = _make_clip(tmp_path / "a.mp4", 2.0, "red")
+    b = _make_clip(tmp_path / "b.mp4", 2.0, "green")
+    c = _make_clip(tmp_path / "c.mp4", 2.0, "blue")
+    out = tmp_path / "x.mp4"
+    assemble([a, b, c], out, transition="crossfade", transition_duration=0.5)
+    # Expected: 6.0 - 2 transitions * 0.5 = 5.0
+    assert _ffprobe_duration(out) == pytest.approx(5.0, abs=0.5)
+
+
+def test_assemble_fade_renders(tmp_path):
+    from waldo.assembler import assemble
+    a = _make_clip(tmp_path / "a.mp4", 2.0, "red")
+    b = _make_clip(tmp_path / "b.mp4", 2.0, "green")
+    out = tmp_path / "f.mp4"
+    assemble([a, b], out, transition="fade", transition_duration=0.5)
+    assert _ffprobe_duration(out) == pytest.approx(3.5, abs=0.5)
+
+
+def test_assemble_random_renders(tmp_path):
+    from waldo.assembler import assemble
+    a = _make_clip(tmp_path / "a.mp4", 2.0, "red")
+    b = _make_clip(tmp_path / "b.mp4", 2.0, "green")
+    c = _make_clip(tmp_path / "c.mp4", 2.0, "blue")
+    out = tmp_path / "r.mp4"
+    assemble([a, b, c], out, transition="random", transition_duration=0.5)
+    assert _ffprobe_duration(out) == pytest.approx(5.0, abs=0.5)
+
+
+def test_assemble_single_clip_copies(tmp_path):
+    from waldo.assembler import assemble
+    a = _make_clip(tmp_path / "a.mp4", 2.0, "red")
+    out = tmp_path / "single.mp4"
+    assemble([a], out, transition="crossfade", transition_duration=0.5)
+    assert out.exists()
+    assert _ffprobe_duration(out) == pytest.approx(2.0, abs=0.2)
+
+
+def test_assemble_empty_raises(tmp_path):
+    from waldo.assembler import assemble
+    with pytest.raises(ValueError):
+        assemble([], tmp_path / "empty.mp4", transition="cut", transition_duration=0.5)
