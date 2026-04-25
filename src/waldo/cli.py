@@ -270,5 +270,72 @@ def run(
     run_pipeline(cfg, auto=auto)
 
 
+@app.command(name="compile")
+def compile_cmd(
+    output: Path = typer.Option(
+        ..., exists=True, file_okay=False, dir_okay=True,
+        help="Output directory previously populated by 'waldo extract', "
+             "containing per-person subfolders with .mp4 clips.",
+    ),
+    persons: str = typer.Option(
+        None,
+        help="Comma-separated person names to include. Each must match a "
+             "subfolder under --output. Mutually exclusive with --all.",
+    ),
+    all: bool = typer.Option(
+        False, "--all",
+        help="Compile every person folder under --output (excluding "
+             "together/ and _compilations/). Mutually exclusive with --persons.",
+    ),
+    transition: str = typer.Option(
+        "crossfade",
+        help="Transition style between clips: crossfade, fade, cut, or random. "
+             "All transitions except 'cut' use a 0.5s overlap.",
+    ),
+) -> None:
+    """Stitch per-person clips into a single compilation video.
+
+    Reads <output>/<person>/*.mp4 for the requested persons, shuffles them,
+    and renders <output>/_compilations/<persons>.mp4 with the chosen transition.
+    Re-running overwrites the output. together/ clips are skipped (their
+    person mapping is lost during extract).
+    """
+    _setup_logging()
+
+    if (persons is None) == (not all):
+        raise typer.BadParameter(
+            "exactly one of --persons or --all must be provided "
+            "(they are mutually exclusive)"
+        )
+
+    from . import assembler
+    from .cutter import check_ffmpeg
+
+    check_ffmpeg()
+
+    if all:
+        names = sorted(
+            d.name for d in output.iterdir()
+            if d.is_dir() and d.name != "together" and not d.name.startswith("_")
+        )
+        out_stem = "all"
+    else:
+        names = [n.strip() for n in persons.split(",") if n.strip()]
+        out_stem = "_".join(names)
+
+    if not names:
+        typer.echo("No persons selected.", err=True)
+        raise typer.Exit(code=1)
+
+    clips = assembler.discover_clips(output, names)
+    if not clips:
+        typer.echo(f"No clips found for: {', '.join(names)}", err=True)
+        raise typer.Exit(code=1)
+
+    out_path = output / "_compilations" / f"{out_stem}.mp4"
+    assembler.assemble(clips, out_path, transition=transition)
+    typer.echo(f"Wrote {out_path}")
+
+
 if __name__ == "__main__":
     app()
