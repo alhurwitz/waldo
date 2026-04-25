@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import random
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -100,3 +101,61 @@ def _probe_duration(path: Path) -> float:
         ],
     )
     return float(out.strip())
+
+
+def assemble(
+    clips: list[Path],
+    out: Path,
+    transition: str,
+    transition_duration: float = 0.5,
+) -> Path:
+    """Stitch clips into a single compilation video at `out`.
+
+    Shuffles clips, probes their durations, builds a chained xfade /
+    acrossfade filter graph (or concat for `cut`), and runs a single
+    re-encoding ffmpeg invocation. For a single clip, copies it to `out`.
+    """
+    if not clips:
+        raise ValueError("no clips to assemble")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(clips) == 1:
+        shutil.copy2(clips[0], out)
+        log.info("only one clip — copied to %s", out)
+        return out
+
+    shuffled = list(clips)
+    random.shuffle(shuffled)
+
+    durations: list[float] = []
+    usable: list[Path] = []
+    for c in shuffled:
+        try:
+            durations.append(_probe_duration(c))
+            usable.append(c)
+        except (subprocess.CalledProcessError, ValueError) as e:
+            log.warning("ffprobe failed for %s: %s — skipping", c, e)
+
+    if len(usable) == 0:
+        raise ValueError("no usable clips after ffprobe")
+    if len(usable) == 1:
+        shutil.copy2(usable[0], out)
+        return out
+
+    graph = _build_filter_complex(durations, transition, transition_duration)
+
+    cmd: list[str] = ["ffmpeg", "-y", "-loglevel", "error"]
+    for c in usable:
+        cmd += ["-i", str(c)]
+    cmd += [
+        "-filter_complex", graph,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    log.info("rendering %d clips → %s", len(usable), out)
+    subprocess.run(cmd, check=True)
+    return out
