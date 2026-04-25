@@ -84,3 +84,60 @@ def test_compile_no_clips_found_exits_nonzero(tmp_path):
         ])
     assert result.exit_code != 0
     mock_assemble.assert_not_called()
+
+
+# ---------- run --compile ----------
+
+def test_run_compile_flag_invokes_assembler(tmp_path):
+    """`run --compile` must call assembler after extract finishes."""
+    input_dir = tmp_path / "media"
+    input_dir.mkdir()
+    refs_dir = tmp_path / "refs"
+    output_dir = tmp_path / "out"
+    # The flag's behavior: after extract, compile every person folder.
+    # We mock the whole pipeline to isolate the wiring.
+    with patch("waldo.pipeline.scan_faces"), \
+         patch("waldo.pipeline.extract_clips") as mock_extract, \
+         patch("waldo.pipeline._compile_all") as mock_compile_all:
+        # Pretend extract created two person folders.
+        def _fake_extract(cfg):
+            (output_dir / "grandma").mkdir(parents=True, exist_ok=True)
+            (output_dir / "grandma" / "a.mp4").write_bytes(b"")
+            (output_dir / "dad").mkdir(parents=True, exist_ok=True)
+            (output_dir / "dad" / "b.mp4").write_bytes(b"")
+        mock_extract.side_effect = _fake_extract
+
+        result = runner.invoke(app, [
+            "run",
+            "--input", str(input_dir),
+            "--refs", str(refs_dir),
+            "--output", str(output_dir),
+            "--auto",
+            "--compile",
+            "--transition", "fade",
+        ])
+    assert result.exit_code == 0, result.output
+    mock_compile_all.assert_called_once()
+    args, kwargs = mock_compile_all.call_args
+    # _compile_all(output_dir, transition)
+    assert args[0] == output_dir
+    assert args[1] == "fade"
+
+
+def test_run_without_compile_flag_skips_assembler(tmp_path):
+    input_dir = tmp_path / "media"
+    input_dir.mkdir()
+    refs_dir = tmp_path / "refs"
+    output_dir = tmp_path / "out"
+    with patch("waldo.pipeline.scan_faces"), \
+         patch("waldo.pipeline.extract_clips"), \
+         patch("waldo.pipeline._compile_all") as mock_compile_all:
+        result = runner.invoke(app, [
+            "run",
+            "--input", str(input_dir),
+            "--refs", str(refs_dir),
+            "--output", str(output_dir),
+            "--auto",
+        ])
+    assert result.exit_code == 0, result.output
+    mock_compile_all.assert_not_called()
