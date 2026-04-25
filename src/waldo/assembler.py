@@ -62,6 +62,27 @@ def _build_filter_complex(
     return ";".join(video_lines + audio_lines)
 
 
+_RESERVED_NAMES = frozenset({"together"})
+
+
 def discover_clips(output_dir: Path, persons: list[str]) -> list[Path]:
-    """Placeholder — implemented in Task 3."""
-    raise NotImplementedError
+    """Return all .mp4 clips under output_dir/<person>/ for each person.
+
+    Skips reserved folders (together, anything starting with `_`).
+    Warns and skips persons whose folder is missing or empty.
+    Result is sorted alphabetically by full path; the assembler shuffles.
+    """
+    clips: list[Path] = []
+    for name in persons:
+        if name in _RESERVED_NAMES or name.startswith("_"):
+            continue
+        folder = output_dir / name
+        if not folder.is_dir():
+            log.warning("no folder for person %r at %s — skipping", name, folder)
+            continue
+        person_clips = sorted(folder.glob("*.mp4"))
+        if not person_clips:
+            log.warning("no .mp4 clips in %s — skipping", folder)
+            continue
+        clips.extend(person_clips)
+    return sorted(clips)
