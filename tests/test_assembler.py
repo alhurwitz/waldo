@@ -71,3 +71,66 @@ def test_filter_complex_random_picks_from_known_set():
 def test_filter_complex_unknown_transition_raises():
     with pytest.raises(ValueError):
         _build_filter_complex([10.0, 5.0], "starwipe", 0.5)
+
+
+# ---------- discover_clips ----------
+
+def _make_tree(root, layout):
+    """Create a dir tree from {folder: [filenames]}."""
+    for folder, files in layout.items():
+        d = root / folder
+        d.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            (d / name).write_bytes(b"")
+
+
+def test_discover_named_persons(tmp_path):
+    _make_tree(tmp_path, {
+        "grandma": ["a.mp4", "b.mp4"],
+        "dad": ["c.mp4"],
+        "together": ["x.mp4"],
+        "_compilations": ["old.mp4"],
+    })
+    clips = discover_clips(tmp_path, ["grandma", "dad"])
+    names = sorted(p.name for p in clips)
+    assert names == ["a.mp4", "b.mp4", "c.mp4"]
+
+
+def test_discover_excludes_together_and_compilations(tmp_path):
+    _make_tree(tmp_path, {
+        "grandma": ["a.mp4"],
+        "together": ["t.mp4"],
+        "_compilations": ["old.mp4"],
+    })
+    clips = discover_clips(tmp_path, ["grandma", "together", "_compilations"])
+    # Even when explicitly named, special folders are skipped.
+    names = sorted(p.name for p in clips)
+    assert names == ["a.mp4"]
+
+
+def test_discover_warns_on_missing_person(tmp_path, caplog):
+    _make_tree(tmp_path, {"grandma": ["a.mp4"]})
+    with caplog.at_level("WARNING"):
+        clips = discover_clips(tmp_path, ["grandma", "ghost"])
+    assert [p.name for p in clips] == ["a.mp4"]
+    assert any("ghost" in r.message for r in caplog.records)
+
+
+def test_discover_warns_on_empty_person_folder(tmp_path, caplog):
+    _make_tree(tmp_path, {"grandma": ["a.mp4"], "dad": []})
+    with caplog.at_level("WARNING"):
+        clips = discover_clips(tmp_path, ["grandma", "dad"])
+    assert [p.name for p in clips] == ["a.mp4"]
+    assert any("dad" in r.message for r in caplog.records)
+
+
+def test_discover_only_mp4(tmp_path):
+    _make_tree(tmp_path, {"grandma": ["a.mp4", "b.mov", "c.txt"]})
+    clips = discover_clips(tmp_path, ["grandma"])
+    assert [p.name for p in clips] == ["a.mp4"]
+
+
+def test_discover_returns_sorted(tmp_path):
+    _make_tree(tmp_path, {"grandma": ["zzz.mp4", "aaa.mp4", "mmm.mp4"]})
+    clips = discover_clips(tmp_path, ["grandma"])
+    assert [p.name for p in clips] == ["aaa.mp4", "mmm.mp4", "zzz.mp4"]
