@@ -251,6 +251,17 @@ def run(
              "(person_1, person_2, ...). Useful for batch processing or when "
              "you don't need to label people by name.",
     ),
+    compile: bool = typer.Option(
+        False, "--compile",
+        help="After extraction, automatically render a compilation video "
+             "covering every identified person, written to "
+             "<output>/_compilations/all.mp4. Uses --transition for the style.",
+    ),
+    transition: str = typer.Option(
+        "crossfade",
+        help="Transition style for --compile: crossfade, fade, cut, or random. "
+             "Ignored when --compile is not set.",
+    ),
 ) -> None:
     """Run the full pipeline: scan → identify → extract.
 
@@ -267,7 +278,7 @@ def run(
     output.mkdir(parents=True, exist_ok=True)
 
     from .pipeline import run as run_pipeline
-    run_pipeline(cfg, auto=auto)
+    run_pipeline(cfg, auto=auto, compile=compile, transition=transition)
 
 
 @app.command(name="compile")

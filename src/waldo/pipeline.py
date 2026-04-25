@@ -453,11 +453,13 @@ def extract_clips(cfg: Config) -> None:
 # run: full pipeline (scan → identify → extract)
 # ---------------------------------------------------------------------------
 
-def run(cfg: Config, auto: bool = False) -> None:
-    """Run the full pipeline: scan → (identify) → extract."""
+def run(cfg: Config, auto: bool = False, compile: bool = False, transition: str = "crossfade") -> None:
+    """Run the full pipeline: scan → (identify) → extract → (compile)."""
     if cfg.refs_dir is not None and cfg.refs_dir.is_dir() and any(cfg.refs_dir.iterdir()):
         # Refs already exist — skip scan, go straight to extract
         extract_clips(cfg)
+        if compile:
+            _compile_all(cfg.output_dir, transition)
         return
 
     scan_faces(cfg)
@@ -472,3 +474,24 @@ def run(cfg: Config, auto: bool = False) -> None:
         print(f"Done! {stats['identified']} identified, {stats['skipped']} skipped, {stats['deleted']} deleted.")
 
     extract_clips(cfg)
+    if compile:
+        _compile_all(cfg.output_dir, transition)
+
+
+def _compile_all(output_dir: Path, transition: str) -> None:
+    """Compile every non-special person folder under output_dir."""
+    from . import assembler
+    names = sorted(
+        d.name for d in output_dir.iterdir()
+        if d.is_dir() and d.name != "together" and not d.name.startswith("_")
+    )
+    if not names:
+        log.info("nothing to compile under %s", output_dir)
+        return
+    clips = assembler.discover_clips(output_dir, names)
+    if not clips:
+        log.info("no clips found under %s", output_dir)
+        return
+    out_path = output_dir / "_compilations" / "all.mp4"
+    assembler.assemble(clips, out_path, transition=transition)
+    log.info("wrote %s", out_path)
